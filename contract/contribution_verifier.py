@@ -1,103 +1,101 @@
-# { "Depends": "py-genlayer:test" }
-"""
-ContributionVerifier — a GenLayer Intelligent Contract
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+"""GitHub Contribution Verifier.
 
-Purpose
--------
-Reward programs (grants, bounties, hackathons, DAO contributor programs)
-need to verify that a wallet address genuinely authored a merged pull
-request on a given GitHub repository — without trusting a centralized
-admin to check this by hand, and without a centralized API being the
-single source of truth.
+The identity flow has two layers:
 
-This contract lets any address submit a PR URL. Validators independently
-fetch the PR page from the web, apply the same verification logic, and
-reach consensus (via `eq_principle_strict_eq`) on whether the PR is:
-  1. actually merged, and
-  2. actually belongs to the expected repository.
+* Off-chain: GitHub OAuth establishes the canonical numeric GitHub user id;
+  a connected wallet signs a short-lived nonce; the backend persists the
+  github_id -> wallet binding and refuses claim preparation when the PR author
+  does not match that binding.
+* On-chain: this Intelligent Contract independently resolves the PR through
+  GitHub's API and records only canonical repository/PR/author data returned
+  by GitHub. The caller must be the same wallet that completed the binding.
 
-If validators agree, the PR is recorded on-chain as a "verified
-contribution" tied to the caller's address. Any other contract or
-frontend can then read this record and use it to gate rewards, badges,
-or governance weight — without re-doing the verification work.
-
-Notes / things to double-check against current GenLayer docs before
-deploying to a live network:
-  - The exact signature and return shape of `gl.get_webpage`
-    (especially `mode='html'` vs `mode='text'`) for JS-heavy pages like
-    GitHub's PR view. GitHub's PR page is mostly server-rendered, so
-    'html' mode should expose the merged/closed state in the raw HTML,
-    but this should be re-verified against the live GenLayer Studio docs.
-  - The current attribute name for the caller's address
-    (`gl.message.sender_address` at time of writing).
-  - Whether `eq_principle_strict_eq` is still the recommended helper
-    for boolean consensus checks, or whether a newer equivalence
-    primitive has replaced it.
+The PR URL is used only to locate the GitHub API resource. Repository name,
+PR number, author id, merge state and canonical URL are all taken from the API
+response rather than trusted from claimant-provided strings.
 """
 
+import json
+import re
 from genlayer import *
 
 
 class ContributionVerifier(gl.Contract):
-    # address (str) -> list of verified PR URLs
-    verified: dict
-    # pr_url (str) -> address (str), to prevent the same PR being claimed twice
-    claimed_by: dict
+    # wallet -> canonical GitHub PR URLs
+    verified: TreeMap[Address, DynArray[str]]
+    # canonical GitHub PR URL -> claiming wallet
+    claimed_by: TreeMap[str, Address]
+    # canonical GitHub PR URL -> canonical GitHub author numeric id
+    author_by_pr: TreeMap[str, bigint]
 
     def __init__(self):
-        self.verified = {}
-        self.claimed_by = {}
+        pass
+
+    def _parse_pr_url(self, pr_url: str):
+        match = re.fullmatch(r"https://github\\.com/([^/]+)/([^/]+)/pull/(\\d+)/?", pr_url.strip())
+        if not match:
+            raise gl.UserError("Invalid canonical GitHub PR URL")
+        return match.group(1), match.group(2), int(match.group(3))
 
     @gl.public.write
-    def verify_pr(self, pr_url: str, expected_repo: str):
+    def verify_pr(self, pr_url: str, github_author_id: bigint):
+        """Verify a merged PR for the caller's already-bound GitHub identity.
+
+        `github_author_id` is supplied by the authenticated identity backend,
+        but it is never trusted as the source of PR truth. The contract fetches
+        the PR from GitHub and independently compares the canonical API author
+        id with this value before recording the claim.
         """
-        Submit a PR for verification.
+        owner, repo, number = self._parse_pr_url(pr_url)
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
 
-        pr_url:        full GitHub PR URL, e.g.
-                        "https://github.com/org/repo/pull/123"
-        expected_repo:  "org/repo" the PR must belong to
-        """
-        # A PR can only ever be claimed once, by whoever submits it first.
-        if pr_url in self.claimed_by:
-            raise Exception("This PR has already been claimed.")
+        def fetch_canonical():
+            response = gl.nondet.web.get(api_url)
+            if response.status_code != 200:
+                return (False, 0, 0, 0, 0, False, "")
+            data = json.loads(response.body.decode("utf-8"))
+            base_repo = data["base"]["repo"]
+            author = data["user"]
+            return (
+                True,
+                int(base_repo["id"]),
+                int(data["id"]),
+                int(data["number"]),
+                int(author["id"]),
+                bool(data.get("merged")),
+                str(data["html_url"]),
+            )
 
-        def check() -> bool:
-            page = gl.get_webpage(pr_url, mode="html")
-            page_lower = page.lower()
+        ok, repository_id, pr_id, pr_number, author_id, merged, canonical_url = gl.eq_principle.strict_eq(fetch_canonical)
 
-            is_merged = "merged" in page_lower and "state=\"merged\"" in page_lower.replace(" ", "")
-            # Fallback simpler check in case the exact attribute format above
-            # doesn't match GitHub's current markup — keep both signals and
-            # require the plain-text "merged" status label as a floor.
-            merged_signal = is_merged or ("status: merged" in page_lower) or (">merged<" in page_lower)
+        if not ok:
+            raise gl.UserError("GitHub API could not resolve this PR")
+        if not merged:
+            raise gl.UserError("PR is not merged")
+        if int(author_id) != int(github_author_id):
+            raise gl.UserError("Canonical PR author is not the bound GitHub identity")
+        if canonical_url in self.claimed_by:
+            raise gl.UserError("This PR has already been claimed")
 
-            belongs = expected_repo.strip().lower() in page_lower
-
-            return bool(merged_signal and belongs)
-
-        # All validators run `check()` independently against the live web
-        # and must reach the same strict boolean result for this to pass.
-        result = gl.eq_principle_strict_eq(check)
-
-        if not result:
-            raise Exception("Could not verify: PR is not merged or does not match the expected repository.")
-
-        caller = str(gl.message.sender_address)
-        self.verified.setdefault(caller, [])
-        self.verified[caller].append(pr_url)
-        self.claimed_by[pr_url] = caller
+        caller = gl.message.sender_address
+        self.verified.setdefault(caller, DynArray())
+        self.verified[caller].append(canonical_url)
+        self.claimed_by[canonical_url] = caller
+        self.author_by_pr[canonical_url] = int(author_id)
 
     @gl.public.view
-    def get_verified(self, address: str) -> list:
-        """Return the list of verified PR URLs for a given address."""
-        return self.verified.get(address, [])
+    def get_verified(self, address: Address) -> list[str]:
+        return list(self.verified.get(address, []))
 
     @gl.public.view
-    def get_verified_count(self, address: str) -> int:
-        """Convenience view: number of verified contributions for an address."""
+    def get_verified_count(self, address: Address) -> int:
         return len(self.verified.get(address, []))
 
     @gl.public.view
-    def get_claimant(self, pr_url: str) -> str:
-        """Return which address (if any) has claimed a given PR URL."""
-        return self.claimed_by.get(pr_url, "")
+    def get_claimant(self, canonical_pr_url: str) -> Address:
+        return self.claimed_by.get(canonical_pr_url, Address("0x0000000000000000000000000000000000000000"))
+
+    @gl.public.view
+    def get_author_id(self, canonical_pr_url: str) -> bigint:
+        return self.author_by_pr.get(canonical_pr_url, 0)
