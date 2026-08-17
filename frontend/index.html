@@ -6,19 +6,57 @@
 <style>body{font-family:system-ui;margin:0;background:#0f1115;color:#eee}main{max-width:760px;margin:40px auto;padding:20px}.card{background:#171a22;border:1px solid #2b3140;border-radius:14px;padding:22px;margin:14px 0}input,button{width:100%;box-sizing:border-box;padding:12px;margin:7px 0;border-radius:8px}input{background:#0f1115;color:#fff;border:1px solid #343b4c}button{border:0;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.status{white-space:pre-wrap;background:#0d0f14;padding:12px;border-radius:8px;color:#b9c0cf}</style>
 </head>
 <body><main>
-<div class="card"><h1>GenLayer Contribution Verifier</h1><p>Connect your own GitHub identity and wallet. No user credentials are hard-coded in the frontend.</p>
-<button id="github">Sign in with GitHub</button><button id="wallet">Connect Wallet</button><div id="identity" class="status">Checking session…</div></div>
-<div class="card"><h2>Verify a merged PR</h2><input id="pr" placeholder="https://github.com/owner/repo/pull/123"><input id="contract" placeholder="GenLayer contract address"><button id="verify" disabled>Verify Contribution</button><div id="result" class="status"></div></div>
+<div class="card"><h1>GenLayer Contribution Verifier</h1><p>GitHub OAuth and a wallet signature are required. Secrets never live in this frontend.</p>
+<button id="github">Sign in with GitHub</button><button id="wallet">Connect & Verify Wallet</button><button id="logout">Log out</button><div id="identity" class="status">Checking session…</div></div>
+<div class="card"><h2>Verify a merged PR</h2><input id="pr" inputmode="url" autocomplete="off" placeholder="https://github.com/owner/repo/pull/123"><input id="contract" autocomplete="off" placeholder="GenLayer contract address"><button id="verify" disabled>Verify Contribution</button><div id="result" class="status"></div></div>
 </main>
-<script type="module">
-const API=(location.origin).replace(/\/$/,'');const $=id=>document.getElementById(id);let account=null,session=false;
-const out=t=>$("result").textContent=t; const setIdentity=t=>$("identity").textContent=t;
-async function sessionCheck(){try{const r=await fetch(`${API}/wallet/nonce`,{credentials:'include'});session=r.ok;setIdentity(`GitHub: ${session?'connected':'not connected'}\nWallet: ${account||'not connected'}`);$("verify").disabled=!(session&&account)}catch(e){session=false;setIdentity('GitHub: not connected\nWallet: '+(account||'not connected'))}}
-$("github").onclick=()=>location.href=`${API}/auth/github`;
-$("wallet").onclick=async()=>{try{if(!window.ethereum)throw Error('MetaMask or an EIP-1193 wallet is required');[account]=await ethereum.request({method:'eth_requestAccounts'});setIdentity(`GitHub: ${session?'connected':'not connected'}\nWallet: ${account}`);$("verify").disabled=!(session&&account)}catch(e){out(e.message)}};
-$("verify").onclick=async()=>{const url=$("pr").value.trim();const contract=$("contract").value.trim();if(!account||!session||!url||!contract)return out('Connect GitHub and wallet, then enter PR URL and contract address.');$("verify").disabled=true;try{
-const p=await fetch(`${API}/claims/prepare`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({pr_url:url,wallet_address:account})});const pj=await p.json();if(!p.ok)throw Error(pj.detail||'Could not prepare claim');
-out(`Verified GitHub contribution prepared.\n${JSON.stringify(pj,null,2)}\n\nThe backend has bound this claim to your authenticated GitHub session and wallet.`);
-}catch(e){out('Verification failed: '+e.message)}finally{await sessionCheck()}};
-await sessionCheck();
+<script>
+'use strict';
+const API=location.origin.replace(/\/$/,'');
+const $=id=>document.getElementById(id);
+let account=null,session=false,bound=false;
+const out=t=>$("result").textContent=t;
+const setIdentity=t=>$("identity").textContent=t;
+
+async function sessionCheck(){
+  try{const r=await fetch(`${API}/wallet/nonce`,{credentials:'include'});session=r.ok;
+    setIdentity(`GitHub: ${session?'connected':'not connected'}\nWallet: ${account||'not connected'}\nBinding: ${bound?'verified':'not verified'}`);
+    $("verify").disabled=!(session&&account&&bound);
+  }catch(e){session=false;setIdentity(`GitHub: not connected\nWallet: ${account||'not connected'}\nBinding: not verified`);$("verify").disabled=true}
+}
+
+$("github").onclick=()=>{location.href=`${API}/auth/github`};
+
+$("wallet").onclick=async()=>{
+  try{
+    if(!window.ethereum)throw Error('MetaMask or another EIP-1193 wallet is required');
+    if(!session)throw Error('Sign in with GitHub first');
+    [account]=await ethereum.request({method:'eth_requestAccounts'});
+    const nonceResponse=await fetch(`${API}/wallet/nonce`,{credentials:'include'});
+    if(!nonceResponse.ok)throw Error('Could not create wallet binding nonce');
+    const nonce=await nonceResponse.json();
+    const signature=await ethereum.request({method:'personal_sign',params:[nonce.message,account]});
+    const verify=await fetch(`${API}/wallet/verify`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({wallet_address:account,signature,nonce:nonce.nonce})});
+    const body=await verify.json();
+    if(!verify.ok)throw Error(body.detail||'Wallet binding failed');
+    bound=true;out('GitHub identity and wallet are cryptographically bound.');await sessionCheck();
+  }catch(e){bound=false;out(e.message)}
+};
+
+$("verify").onclick=async()=>{
+  const url=$("pr").value.trim();
+  const contract=$("contract").value.trim();
+  if(!account||!session||!bound||!url||!contract)return out('Complete GitHub login, wallet binding, PR URL and contract address first.');
+  $("verify").disabled=true;
+  try{
+    const p=await fetch(`${API}/claims/prepare`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({pr_url:url,wallet_address:account})});
+    const pj=await p.json();if(!p.ok)throw Error(pj.detail||'Could not prepare claim');
+    out(`Verified canonical merged PR.\n${JSON.stringify(pj,null,2)}\n\nThe backend confirmed the GitHub author matches the authenticated wallet binding.`);
+  }catch(e){out('Verification failed: '+e.message)}finally{await sessionCheck()}
+};
+
+$("logout").onclick=async()=>{await fetch(`${API}/auth/logout`,{method:'POST',credentials:'include'});session=false;bound=false;account=null;setIdentity('GitHub: not connected\nWallet: not connected\nBinding: not verified');$("verify").disabled=true;out('Logged out.')};
+
+if(window.ethereum){ethereum.on?.('accountsChanged',accounts=>{account=accounts[0]||null;bound=false;sessionCheck()})}
+sessionCheck();
 </script></body></html>
