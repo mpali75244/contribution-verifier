@@ -1,86 +1,71 @@
 # GitHub Contribution Verifier
 
-A [GenLayer](https://genlayer.com) Intelligent Contract that verifies GitHub
-pull-request contributions on-chain — without a centralized admin manually
-checking PR links, and without trusting a single centralized API as the
-source of truth.
+A GenLayer Intelligent Contract that verifies merged GitHub pull requests and records the canonical contribution against the caller's wallet.
 
-## The problem
+## Steward-requested identity flow
 
-Reward programs (grants, bounties, hackathon judging, DAO contributor
-tracks) need to confirm that a wallet address genuinely authored a **merged**
-pull request against a **specific repository**. Today this is either:
-
-- done by hand by an admin (slow, doesn't scale, trust bottleneck), or
-- backed by a single centralized API call (re-introduces a trusted third party).
-
-## The approach
-
-`ContributionVerifier` is an Intelligent Contract. When a user submits a PR
-URL:
-
-1. GenLayer validators each independently fetch the PR page from the live web.
-2. Each validator checks, from the fetched page, whether the PR is merged
-   and whether it belongs to the expected repository.
-3. Validators reach consensus on that boolean result (`eq_principle_strict_eq`).
-4. If consensus says "yes", the PR is recorded on-chain against the caller's
-   address — and can never be claimed again by anyone else.
-
-Any other contract, frontend, or reward program can then read
-`get_verified(address)` and trust the result without redoing the check.
-
-## Project structure
-
+```text
+GitHub OAuth -> canonical numeric GitHub user id
+            -> wallet signs one-time nonce
+            -> persistent github_id -> wallet binding
+            -> GitHub API resolves canonical PR data
+            -> canonical PR author id must match the binding
+            -> same wallet calls the Intelligent Contract
+            -> contract re-fetches canonical PR data
+            -> validator consensus verifies author + merged state
+            -> canonical PR URL recorded on-chain
 ```
+
+### Persistent GitHub ↔ wallet binding
+
+`backend/app.py` obtains the GitHub `id` and `login` from GitHub OAuth/API rather than accepting a typed username. The stable numeric `github_id` is the binding key.
+
+The connected wallet signs a short-lived EIP-191 message containing the GitHub id, login, nonce and expiry. The backend recovers the signer, verifies it equals the wallet address, consumes the nonce, and persists the binding in SQLite.
+
+### Canonical PR identity
+
+The PR URL is only a lookup locator. `POST /claims/prepare` resolves the PR through the GitHub API and takes repository id/name, PR id/number, author id/login, merge state and canonical URL from the API response. The backend refuses a claim when the canonical `author_id` does not equal the persistent GitHub id bound to the wallet.
+
+### Independent on-chain verification
+
+`contract/contribution_verifier.py` independently calls the GitHub REST API inside a GenLayer non-deterministic block and normalizes stable fields. `gl.eq_principle.strict_eq` makes validators agree on the canonical result. The contract compares the API author id with the authenticated GitHub identity and stores the canonical GitHub URL, not an arbitrary claimant string.
+
+## Structure
+
+```text
 contribution-verifier/
-├── contract/
-│   └── contribution_verifier.py   # the Intelligent Contract
-├── frontend/
-│   └── index.html                 # minimal demo UI (submit + view badges)
-└── README.md
+├── contract/contribution_verifier.py
+├── frontend/index.html
+├── backend/app.py
+├── backend/requirements.txt
+└── backend/README.md
 ```
+
+## Backend setup
+
+```bash
+pip install -r backend/requirements.txt
+set GITHUB_CLIENT_ID=...
+set GITHUB_CLIENT_SECRET=...
+set SESSION_SECRET=use-a-long-random-secret
+set GITHUB_TOKEN=...
+uvicorn backend.app:app --reload
+```
+
+For production, use HTTPS, a real session store/database, secure cookies, key rotation and minimum GitHub permissions. Never commit OAuth secrets or tokens.
 
 ## Contract interface
 
 | Method | Type | Description |
 |---|---|---|
-| `verify_pr(pr_url, expected_repo)` | write | Submit a PR for validator verification. Reverts if already claimed or if verification fails. |
-| `get_verified(address)` | view | List of verified PR URLs for an address. |
+| `verify_pr(pr_url, github_author_id)` | write | Re-resolves the PR through GitHub, checks merged state and canonical author id, then records it for the caller. |
+| `get_verified(address)` | view | Canonical verified PR URLs for an address. |
 | `get_verified_count(address)` | view | Number of verified contributions for an address. |
-| `get_claimant(pr_url)` | view | Which address (if any) has already claimed a PR. |
+| `get_claimant(canonical_pr_url)` | view | Wallet that claimed a canonical PR. |
+| `get_author_id(canonical_pr_url)` | view | Canonical GitHub author id recorded for the PR. |
 
-## Running locally
+## Important deployment note
 
-1. Install the [GenLayer Studio](https://studio.genlayer.com) / local CLI
-   per the current GenLayer docs.
-2. Deploy `contract/contribution_verifier.py` to your local network or testnet.
-3. Open `frontend/index.html` (any static server, e.g. `npx serve frontend`)
-   and point it at your deployed contract address.
+GitHub OAuth is an off-chain authentication flow, so the backend establishes the persistent identity binding. The Intelligent Contract remains responsible for independent web verification and final on-chain recording against `gl.message.sender_address`.
 
-## ⚠️ Before deploying to a live network
-
-This was built from the current public GenLayer docs and examples, but a
-few specifics are worth re-verifying against the latest docs before you
-trust it with real rewards, since the SDK/runtime move quickly:
-
-- Exact behavior of `gl.get_webpage(..., mode="html")` on GitHub's PR pages
-  (server-rendered vs. JS-hydrated content).
-- Current attribute name for the caller's address (`gl.message.sender_address`).
-- Whether `eq_principle_strict_eq` is still the recommended consensus
-  primitive for boolean checks.
-- The current `genlayer-js` client init API used in `frontend/index.html`
-  (account/wallet connection flow in particular).
-
-## Pushing this to GitHub
-
-This repo was generated locally and isn't pushed anywhere yet. From this
-folder:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit: GitHub Contribution Verifier"
-git branch -M main
-git remote add origin https://github.com/<your-username>/<your-repo>.git
-git push -u origin main
-```
+Before live deployment, run the current GenLayer linter/tests and verify the installed SDK/runtime against the current GenLayer documentation.
