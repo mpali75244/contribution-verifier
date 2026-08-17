@@ -25,7 +25,7 @@
     <p>Bind a canonical GitHub identity to your wallet, then verify a merged PR through the GenLayer Intelligent Contract.</p>
 
     <label>Backend URL</label>
-    <input id="backend" value="" placeholder="https://your-backend.example" />
+    <input id="backend" value="https://contribution-verifier-backend-production.up.railway.app" />
 
     <label>Contract address</label>
     <input id="contract" placeholder="0x..." />
@@ -87,86 +87,38 @@
     $("bindBtn").disabled = true;
     try {
       if (!walletAddress) await connectWallet();
-
       const nonceRes = await fetch(`${backend()}/wallet/nonce`, { credentials: "include" });
       if (!nonceRes.ok) throw new Error("GitHub OAuth session is missing. Sign in with GitHub first.");
       const nonceData = await nonceRes.json();
-
-      const signature = await window.ethereum.request({
-        method: "personal_sign",
-        params: [nonceData.message, walletAddress],
-      });
-
-      const verifyRes = await fetch(`${backend()}/wallet/verify`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wallet_address: walletAddress, signature, nonce: nonceData.nonce }),
-      });
+      const signature = await window.ethereum.request({ method: "personal_sign", params: [nonceData.message, walletAddress] });
+      const verifyRes = await fetch(`${backend()}/wallet/verify`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wallet_address: walletAddress, signature, nonce: nonceData.nonce }) });
       if (!verifyRes.ok) throw new Error(await verifyRes.text());
-
-      const proofRes = await fetch(`${backend()}/api/proof/generate`, {
-        method: "POST",
-        credentials: "include",
-      });
+      const proofRes = await fetch(`${backend()}/api/proof/generate`, { method: "POST", credentials: "include" });
       if (!proofRes.ok) throw new Error(await proofRes.text());
       const proof = await proofRes.json();
-
-      const client = createClient({
-        chain: testnetBradbury,
-        account: walletAddress,
-        provider: window.ethereum,
-      });
+      const client = createClient({ chain: testnetBradbury, account: walletAddress, provider: window.ethereum });
       await client.connect("testnetBradbury");
-
       status("Submitting bind_identity() and waiting for validator consensus...");
-      const txHash = await client.writeContract({
-        address: $("contract").value.trim(),
-        functionName: "bind_identity",
-        args: [proof.token],
-        value: BigInt(0),
-      });
-      const receipt = await client.waitForTransactionReceipt({
-        hash: txHash,
-        status: TransactionStatus.ACCEPTED,
-      });
+      const txHash = await client.writeContract({ address: $("contract").value.trim(), functionName: "bind_identity", args: [proof.token], value: BigInt(0) });
+      const receipt = await client.waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED });
       status(`Identity bound. Transaction: ${txHash}\n${JSON.stringify(receipt, null, 2)}`);
       githubReady = true;
       setButtons();
-    } catch (e) {
-      status(`Binding failed: ${e.message || e}`);
-      setButtons();
-    }
+    } catch (e) { status(`Binding failed: ${e.message || e}`); setButtons(); }
   };
 
   $("claimBtn").onclick = async () => {
     $("claimBtn").disabled = true;
     try {
       if (!walletAddress) await connectWallet();
-      const client = createClient({
-        chain: testnetBradbury,
-        account: walletAddress,
-        provider: window.ethereum,
-      });
+      const client = createClient({ chain: testnetBradbury, account: walletAddress, provider: window.ethereum });
       await client.connect("testnetBradbury");
-
       status("Submitting canonical PR lookup and waiting for validator consensus...");
-      const txHash = await client.writeContract({
-        address: $("contract").value.trim(),
-        functionName: "submit_claim",
-        args: [$("prUrl").value.trim()],
-        value: BigInt(0),
-      });
-      const receipt = await client.waitForTransactionReceipt({
-        hash: txHash,
-        status: TransactionStatus.ACCEPTED,
-      });
+      const txHash = await client.writeContract({ address: $("contract").value.trim(), functionName: "submit_claim", args: [$("prUrl").value.trim()], value: BigInt(0) });
+      const receipt = await client.waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED });
       status(`Contribution recorded. Transaction: ${txHash}\n${JSON.stringify(receipt, null, 2)}`);
-    } catch (e) {
-      status(`Claim failed: ${e.message || e}`);
-    } finally {
-      setButtons();
-    }
+    } catch (e) { status(`Claim failed: ${e.message || e}`); }
+    finally { setButtons(); }
   };
 
   try { await connectWallet(); } catch (_) {}
