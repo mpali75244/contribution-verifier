@@ -36,6 +36,11 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "/")
 PROOF_TTL = 300
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 def conn():
     os.makedirs(os.path.dirname(DB) or ".", exist_ok=True)
     c = sqlite3.connect(DB)
