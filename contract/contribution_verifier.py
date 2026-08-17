@@ -1,101 +1,139 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
-"""GitHub Contribution Verifier.
+"""GenLayer GitHub contribution verifier.
 
-The identity flow has two layers:
+The contract verifies two trust boundaries:
 
-* Off-chain: GitHub OAuth establishes the canonical numeric GitHub user id;
-  a connected wallet signs a short-lived nonce; the backend persists the
-  github_id -> wallet binding and refuses claim preparation when the PR author
-  does not match that binding.
-* On-chain: this Intelligent Contract independently resolves the PR through
-  GitHub's API and records only canonical repository/PR/author data returned
-  by GitHub. The caller must be the same wallet that completed the binding.
+1. A canonical GitHub identity is bound to the transaction sender. The
+   backend performs GitHub OAuth and wallet-signature verification off-chain,
+   then exposes a short-lived, read-only proof. Validators independently read
+   that proof and reach strict consensus before the binding is persisted.
+2. A submitted PR URL is only a lookup hint. The backend resolves it through
+   the authenticated GitHub API and returns canonical repository, PR, author,
+   and merge fields. The contract uses only that canonical response.
 
-The PR URL is used only to locate the GitHub API resource. Repository name,
-PR number, author id, merge state and canonical URL are all taken from the API
-response rather than trusted from claimant-provided strings.
+Proof endpoints must remain readable until expiry. Validators must never see
+one-time deletion semantics during a consensus round.
 """
 
+from dataclasses import dataclass
 import json
-import re
+import typing
+
 from genlayer import *
 
 
+@allow_storage
+@dataclass
+class Contribution:
+    repository: str
+    pr_number: u256
+    author_github_id: u256
+    claimant_wallet: Address
+    merged_at: str
+
+
 class ContributionVerifier(gl.Contract):
-    # wallet -> canonical GitHub PR URLs
-    verified: TreeMap[Address, DynArray[str]]
-    # canonical GitHub PR URL -> claiming wallet
-    claimed_by: TreeMap[str, Address]
-    # canonical GitHub PR URL -> canonical GitHub author numeric id
-    author_by_pr: TreeMap[str, bigint]
+    # Stable GitHub numeric user id -> wallet address.
+    bindings: TreeMap[str, Address]
 
-    def __init__(self):
-        pass
+    # Canonical repository + PR number -> already claimed.
+    processed_prs: TreeMap[str, bool]
 
-    def _parse_pr_url(self, pr_url: str):
-        match = re.fullmatch(r"https://github\\.com/([^/]+)/([^/]+)/pull/(\\d+)/?", pr_url.strip())
-        if not match:
-            raise gl.UserError("Invalid canonical GitHub PR URL")
-        return match.group(1), match.group(2), int(match.group(3))
+    # Accepted claims.
+    claims: DynArray[Contribution]
+
+    # Read-only backend base URL, e.g. https://verifier.example.com
+    proof_service_base: str
+
+    def __init__(self, proof_service_base: str):
+        self.proof_service_base = proof_service_base
 
     @gl.public.write
-    def verify_pr(self, pr_url: str, github_author_id: bigint):
-        """Verify a merged PR for the caller's already-bound GitHub identity.
+    def bind_identity(self, proof_token: str) -> typing.Any:
+        """Bind the OAuth-verified GitHub id to this transaction sender."""
+        proof_url = f"{self.proof_service_base}/api/proof/{proof_token}"
 
-        `github_author_id` is supplied by the authenticated identity backend,
-        but it is never trusted as the source of PR truth. The contract fetches
-        the PR from GitHub and independently compares the canonical API author
-        id with this value before recording the claim.
+        def fetch_proof() -> str:
+            response = gl.nondet.web.get(proof_url)
+            return response.body.decode("utf-8")
+
+        # The proof is normalized JSON returned by a read-only endpoint.
+        raw = gl.eq_principle.strict_eq(fetch_proof)
+        proof = json.loads(raw)
+
+        assert proof.get("valid") is True, "proof is missing or expired"
+        assert "github_id" in proof, "proof missing github_id"
+        assert "wallet_address" in proof, "proof missing wallet_address"
+        assert str(proof["wallet_address"]).lower() == str(gl.message.sender_address).lower(), (
+            "proof wallet does not match transaction sender"
+        )
+
+        github_id = str(proof["github_id"])
+        existing = self.bindings.get(github_id, None)
+        if existing is not None:
+            assert existing == gl.message.sender_address, "GitHub identity already bound"
+            return
+
+        self.bindings[github_id] = gl.message.sender_address
+
+    @gl.public.write
+    def submit_claim(self, pr_url: str) -> typing.Any:
+        """Verify a merged PR for the caller's bound GitHub identity.
+
+        The user-supplied URL is never treated as canonical identity data. It
+        is only passed to the backend resolver. Canonical repository, PR
+        number, author id, merge state, and merge timestamp come from the
+        authenticated GitHub API response returned by that resolver.
         """
-        owner, repo, number = self._parse_pr_url(pr_url)
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
+        resolve_url = f"{self.proof_service_base}/api/pr/resolve?url={pr_url}"
 
-        def fetch_canonical():
-            response = gl.nondet.web.get(api_url)
-            if response.status_code != 200:
-                return (False, 0, 0, 0, 0, False, "")
-            data = json.loads(response.body.decode("utf-8"))
-            base_repo = data["base"]["repo"]
-            author = data["user"]
-            return (
-                True,
-                int(base_repo["id"]),
-                int(data["id"]),
-                int(data["number"]),
-                int(author["id"]),
-                bool(data.get("merged")),
-                str(data["html_url"]),
-            )
+        def fetch_pr() -> str:
+            response = gl.nondet.web.get(resolve_url)
+            return response.body.decode("utf-8")
 
-        ok, repository_id, pr_id, pr_number, author_id, merged, canonical_url = gl.eq_principle.strict_eq(fetch_canonical)
+        raw_pr = gl.eq_principle.strict_eq(fetch_pr)
+        pr = json.loads(raw_pr)
 
-        if not ok:
-            raise gl.UserError("GitHub API could not resolve this PR")
-        if not merged:
-            raise gl.UserError("PR is not merged")
-        if int(author_id) != int(github_author_id):
-            raise gl.UserError("Canonical PR author is not the bound GitHub identity")
-        if canonical_url in self.claimed_by:
-            raise gl.UserError("This PR has already been claimed")
+        assert pr.get("valid") is True, "GitHub PR could not be resolved"
+        assert pr.get("merged") is True, "PR is not merged"
+        assert "repository" in pr and "pr_number" in pr and "author_id" in pr, (
+            "canonical PR data is incomplete"
+        )
 
-        caller = gl.message.sender_address
-        self.verified.setdefault(caller, DynArray())
-        self.verified[caller].append(canonical_url)
-        self.claimed_by[canonical_url] = caller
-        self.author_by_pr[canonical_url] = int(author_id)
+        repository = str(pr["repository"])
+        pr_number = u256(int(pr["pr_number"]))
+        author_github_id = str(pr["author_id"])
 
-    @gl.public.view
-    def get_verified(self, address: Address) -> list[str]:
-        return list(self.verified.get(address, []))
+        bound_wallet = self.bindings.get(author_github_id, None)
+        assert bound_wallet is not None, "PR author has no bound wallet"
+        assert bound_wallet == gl.message.sender_address, (
+            "caller is not the bound wallet for this PR author"
+        )
+
+        pr_key = f"{repository}#{int(pr_number)}"
+        assert not self.processed_prs.get(pr_key, False), "PR already claimed"
+
+        contribution = Contribution(
+            repository=repository,
+            pr_number=pr_number,
+            author_github_id=u256(int(author_github_id)),
+            claimant_wallet=gl.message.sender_address,
+            merged_at=str(pr.get("merged_at", "")),
+        )
+        self.claims.append(contribution)
+        self.processed_prs[pr_key] = True
 
     @gl.public.view
-    def get_verified_count(self, address: Address) -> int:
-        return len(self.verified.get(address, []))
+    def is_bound(self, github_id: str) -> bool:
+        return self.bindings.get(github_id, None) is not None
 
     @gl.public.view
-    def get_claimant(self, canonical_pr_url: str) -> Address:
-        return self.claimed_by.get(canonical_pr_url, Address("0x0000000000000000000000000000000000000000"))
+    def get_bound_wallet(self, github_id: str) -> Address:
+        return self.bindings.get(
+            github_id,
+            Address("0x0000000000000000000000000000000000000000"),
+        )
 
     @gl.public.view
-    def get_author_id(self, canonical_pr_url: str) -> bigint:
-        return self.author_by_pr.get(canonical_pr_url, 0)
+    def get_claims(self) -> DynArray[Contribution]:
+        return self.claims
