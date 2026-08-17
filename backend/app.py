@@ -32,6 +32,7 @@ CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "change-me")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "/")
 PROOF_TTL = 300
 
 
@@ -139,7 +140,7 @@ def github_callback(code: str, state: str, request: Request):
         {"github_id": int(user["id"]), "github_login": user["login"]},
         separators=(",", ":"),
     )
-    r = RedirectResponse("/wallet/nonce")
+    r = RedirectResponse(FRONTEND_URL)
     r.set_cookie("identity", seal(identity), httponly=True, samesite="lax", secure=True)
     return r
 
@@ -275,11 +276,7 @@ def generate_proof(request: Request):
 
 @app.get("/api/proof/{token}")
 def get_proof(token: str):
-    """Read-only proof endpoint for GenLayer validators.
-
-    Never delete or mark the proof consumed here. It must return identical
-    content to independent validators until the proof expires.
-    """
+    """Read-only proof endpoint for GenLayer validators."""
     c = conn()
     row = c.execute(
         "SELECT github_id, wallet, expires FROM proofs WHERE token=?",
@@ -330,7 +327,7 @@ def resolve_canonical_pr(pr_url: str):
         raise HTTPException(404, "PR not found through authenticated GitHub API")
 
     pr = r.json()
-    canonical = {
+    return {
         "author_id": int(pr["user"]["id"]),
         "author_login": pr["user"]["login"],
         "merged": bool(pr.get("merged")),
@@ -342,18 +339,12 @@ def resolve_canonical_pr(pr_url: str):
         "html_url": pr["html_url"],
         "valid": True,
     }
-    return canonical
 
 
 @app.get("/api/pr/resolve")
 def resolve_pr(url: HttpUrl):
-    """Public canonical resolver consumed by GenLayer validators.
-
-    The URL is only a lookup hint. The returned identity fields are exclusively
-    derived from the authenticated GitHub API response.
-    """
-    canonical = resolve_canonical_pr(str(url))
-    return stable_json(canonical)
+    """Public canonical resolver consumed by GenLayer validators."""
+    return stable_json(resolve_canonical_pr(str(url)))
 
 
 @app.post("/claims/prepare")
