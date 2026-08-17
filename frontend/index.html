@@ -1,128 +1,24 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>GitHub Contribution Verifier</title>
-  <style>
-    body { margin: 0; background: #0f1115; color: #e7e9ee; font-family: system-ui, sans-serif; }
-    main { max-width: 720px; margin: 48px auto; padding: 24px; }
-    .card { background: #171a22; border: 1px solid #2a2f3b; border-radius: 14px; padding: 24px; margin-bottom: 18px; }
-    h1 { margin-top: 0; }
-    p, label { color: #a9afbd; line-height: 1.5; }
-    input, button { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 8px; margin-top: 8px; }
-    input { background: #0f1115; border: 1px solid #303645; color: #fff; }
-    button { border: 0; cursor: pointer; font-weight: 700; }
-    button:disabled { opacity: .5; cursor: wait; }
-    .status { margin-top: 12px; padding: 12px; border-radius: 8px; white-space: pre-wrap; }
-    code { word-break: break-all; }
-  </style>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GenLayer Contribution Verifier</title>
+<style>body{font-family:system-ui;margin:0;background:#0f1115;color:#eee}main{max-width:760px;margin:40px auto;padding:20px}.card{background:#171a22;border:1px solid #2b3140;border-radius:14px;padding:22px;margin:14px 0}input,button{width:100%;box-sizing:border-box;padding:12px;margin:7px 0;border-radius:8px}input{background:#0f1115;color:#fff;border:1px solid #343b4c}button{border:0;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.status{white-space:pre-wrap;background:#0d0f14;padding:12px;border-radius:8px;color:#b9c0cf}</style>
 </head>
-<body>
-<main>
-  <div class="card">
-    <h1>GitHub Contribution Verifier</h1>
-    <p>Bind a canonical GitHub identity to your wallet, then verify a merged PR through the GenLayer Intelligent Contract.</p>
-
-    <label>Backend URL</label>
-    <input id="backend" value="https://contribution-verifier-backend-production.up.railway.app" />
-
-    <label>Contract address</label>
-    <input id="contract" placeholder="0x..." />
-
-    <button id="githubBtn">1. Sign in with GitHub</button>
-    <button id="bindBtn" disabled>2. Bind GitHub identity to wallet</button>
-
-    <div id="identity" class="status">Wallet: not connected</div>
-    <div id="status" class="status"></div>
-  </div>
-
-  <div class="card">
-    <label>Merged PR URL</label>
-    <input id="prUrl" placeholder="https://github.com/org/repo/pull/123" />
-    <button id="claimBtn" disabled>3. Verify and record contribution</button>
-  </div>
+<body><main>
+<div class="card"><h1>GenLayer Contribution Verifier</h1><p>Connect your own GitHub identity and wallet. No user credentials are hard-coded in the frontend.</p>
+<button id="github">Sign in with GitHub</button><button id="wallet">Connect Wallet</button><div id="identity" class="status">Checking session…</div></div>
+<div class="card"><h2>Verify a merged PR</h2><input id="pr" placeholder="https://github.com/owner/repo/pull/123"><input id="contract" placeholder="GenLayer contract address"><button id="verify" disabled>Verify Contribution</button><div id="result" class="status"></div></div>
 </main>
-
 <script type="module">
-  import { createClient } from "https://esm.sh/genlayer-js";
-  import { testnetBradbury } from "https://esm.sh/genlayer-js/chains";
-  import { TransactionStatus } from "https://esm.sh/genlayer-js/types";
-
-  const $ = (id) => document.getElementById(id);
-  const backend = () => ($("backend").value.trim() || window.location.origin).replace(/\/$/, "");
-
-  let walletAddress = null;
-  let githubReady = false;
-
-  function status(text) { $("status").textContent = text; }
-  function setButtons() {
-    $("bindBtn").disabled = !walletAddress || !githubReady;
-    $("claimBtn").disabled = !walletAddress || !githubReady;
-    $("identity").textContent = `Wallet: ${walletAddress || "not connected"}\nGitHub OAuth: ${githubReady ? "connected" : "not connected"}`;
-  }
-
-  async function connectWallet() {
-    if (!window.ethereum) throw new Error("MetaMask or another EIP-1193 wallet is required.");
-    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-    walletAddress = accounts[0];
-    setButtons();
-  }
-
-  async function githubSessionExists() {
-    try {
-      const r = await fetch(`${backend()}/wallet/nonce`, { credentials: "include" });
-      githubReady = r.ok;
-    } catch (_) {
-      githubReady = false;
-    }
-    setButtons();
-  }
-
-  $("githubBtn").onclick = () => {
-    window.location.href = `${backend()}/auth/github`;
-  };
-
-  $("bindBtn").onclick = async () => {
-    $("bindBtn").disabled = true;
-    try {
-      if (!walletAddress) await connectWallet();
-      const nonceRes = await fetch(`${backend()}/wallet/nonce`, { credentials: "include" });
-      if (!nonceRes.ok) throw new Error("GitHub OAuth session is missing. Sign in with GitHub first.");
-      const nonceData = await nonceRes.json();
-      const signature = await window.ethereum.request({ method: "personal_sign", params: [nonceData.message, walletAddress] });
-      const verifyRes = await fetch(`${backend()}/wallet/verify`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wallet_address: walletAddress, signature, nonce: nonceData.nonce }) });
-      if (!verifyRes.ok) throw new Error(await verifyRes.text());
-      const proofRes = await fetch(`${backend()}/api/proof/generate`, { method: "POST", credentials: "include" });
-      if (!proofRes.ok) throw new Error(await proofRes.text());
-      const proof = await proofRes.json();
-      const client = createClient({ chain: testnetBradbury, account: walletAddress, provider: window.ethereum });
-      await client.connect("testnetBradbury");
-      status("Submitting bind_identity() and waiting for validator consensus...");
-      const txHash = await client.writeContract({ address: $("contract").value.trim(), functionName: "bind_identity", args: [proof.token], value: BigInt(0) });
-      const receipt = await client.waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED });
-      status(`Identity bound. Transaction: ${txHash}\n${JSON.stringify(receipt, null, 2)}`);
-      githubReady = true;
-      setButtons();
-    } catch (e) { status(`Binding failed: ${e.message || e}`); setButtons(); }
-  };
-
-  $("claimBtn").onclick = async () => {
-    $("claimBtn").disabled = true;
-    try {
-      if (!walletAddress) await connectWallet();
-      const client = createClient({ chain: testnetBradbury, account: walletAddress, provider: window.ethereum });
-      await client.connect("testnetBradbury");
-      status("Submitting canonical PR lookup and waiting for validator consensus...");
-      const txHash = await client.writeContract({ address: $("contract").value.trim(), functionName: "submit_claim", args: [$("prUrl").value.trim()], value: BigInt(0) });
-      const receipt = await client.waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED });
-      status(`Contribution recorded. Transaction: ${txHash}\n${JSON.stringify(receipt, null, 2)}`);
-    } catch (e) { status(`Claim failed: ${e.message || e}`); }
-    finally { setButtons(); }
-  };
-
-  try { await connectWallet(); } catch (_) {}
-  await githubSessionExists();
-</script>
-</body>
-</html>
+const API=(location.origin).replace(/\/$/,'');const $=id=>document.getElementById(id);let account=null,session=false;
+const out=t=>$("result").textContent=t; const setIdentity=t=>$("identity").textContent=t;
+async function sessionCheck(){try{const r=await fetch(`${API}/wallet/nonce`,{credentials:'include'});session=r.ok;setIdentity(`GitHub: ${session?'connected':'not connected'}\nWallet: ${account||'not connected'}`);$("verify").disabled=!(session&&account)}catch(e){session=false;setIdentity('GitHub: not connected\nWallet: '+(account||'not connected'))}}
+$("github").onclick=()=>location.href=`${API}/auth/github`;
+$("wallet").onclick=async()=>{try{if(!window.ethereum)throw Error('MetaMask or an EIP-1193 wallet is required');[account]=await ethereum.request({method:'eth_requestAccounts'});setIdentity(`GitHub: ${session?'connected':'not connected'}\nWallet: ${account}`);$("verify").disabled=!(session&&account)}catch(e){out(e.message)}};
+$("verify").onclick=async()=>{const url=$("pr").value.trim();const contract=$("contract").value.trim();if(!account||!session||!url||!contract)return out('Connect GitHub and wallet, then enter PR URL and contract address.');$("verify").disabled=true;try{
+const p=await fetch(`${API}/claims/prepare`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({pr_url:url,wallet_address:account})});const pj=await p.json();if(!p.ok)throw Error(pj.detail||'Could not prepare claim');
+out(`Verified GitHub contribution prepared.\n${JSON.stringify(pj,null,2)}\n\nThe backend has bound this claim to your authenticated GitHub session and wallet.`);
+}catch(e){out('Verification failed: '+e.message)}finally{await sessionCheck()}};
+await sessionCheck();
+</script></body></html>
