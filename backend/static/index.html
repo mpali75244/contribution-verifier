@@ -4,23 +4,44 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Contribution Verifier</title>
 <style>
-:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:#0b0e13;color:#f4f7fb}main{max-width:760px;margin:0 auto;padding:48px 20px}.card{background:#121722;border:1px solid #252d3b;border-radius:18px;padding:24px;margin-bottom:18px;box-shadow:0 12px 40px #0005}h1{margin:0 0 8px;font-size:30px}h2{font-size:18px;margin:0 0 14px}p,.muted{color:#9da8ba;line-height:1.55}label{display:block;margin:16px 0 6px;color:#cbd3df;font-size:14px}input,button{width:100%;padding:12px 14px;border-radius:10px;font:inherit}input{background:#0b0e13;color:#fff;border:1px solid #30394a}button{margin-top:10px;border:0;background:#f1f5f9;color:#0b0e13;font-weight:700;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.status{margin-top:14px;padding:13px;border-radius:10px;background:#0b0e13;border:1px solid #252d3b;white-space:pre-wrap;word-break:break-word}.ok{border-color:#285c43}.error{border-color:#743b45}.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#202838;color:#b9c8dd;font-size:12px}.note{font-size:13px}
+:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:#0b0e13;color:#f4f7fb}main{max-width:760px;margin:0 auto;padding:48px 20px}.card{background:#121722;border:1px solid #252d3b;border-radius:18px;padding:24px;margin-bottom:18px;box-shadow:0 12px 40px #0005}h1{margin:0 0 8px;font-size:30px}h2{font-size:18px;margin:0 0 14px}p,.muted{color:#9da8ba;line-height:1.55}label{display:block;margin:16px 0 6px;color:#cbd3df;font-size:14px}input,button{width:100%;padding:12px 14px;border-radius:10px;font:inherit}input{background:#0b0e13;color:#fff;border:1px solid #30394a}button{margin-top:10px;border:0;background:#f1f5f9;color:#0b0e13;font-weight:700;cursor:pointer}button.secondary{background:#202838;color:#f1f5f9}button:disabled{opacity:.45;cursor:not-allowed}.status{margin-top:14px;padding:13px;border-radius:10px;background:#0b0e13;border:1px solid #252d3b;white-space:pre-wrap;word-break:break-word}.ok{border-color:#285c43}.error{border-color:#743b45}.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#202838;color:#b9c8dd;font-size:12px}.note{font-size:13px}.hidden{display:none}.row{display:flex;gap:10px}.row>*{flex:1}.identity{padding:12px;border:1px solid #285c43;border-radius:10px;background:#0d1712;margin-top:14px}
 </style>
 </head>
 <body><main>
-<div class="card"><span class="badge">GenLayer • GitHub</span><h1>Contribution Verifier</h1><p>Check a public GitHub identity and a merged pull request using GitHub's public API. No GitHub login, token, or wallet connection is required.</p>
-<label>GitHub username</label><input id="user" placeholder="e.g. mpali75244" autocomplete="off">
-<label>Wallet address</label><input id="wallet" placeholder="0x…" autocomplete="off">
+<div class="card"><span class="badge">GenLayer • GitHub</span><h1>Contribution Verifier</h1><p>Bind a GitHub identity to an EVM wallet, then verify a merged pull request belonging to that identity.</p>
+<div id="login"><button id="github">Sign in with GitHub</button><p class="note">GitHub Client ID/Secret are handled by the server. You never enter them here.</p></div>
+<div id="connected" class="hidden">
+<div id="identity" class="identity">GitHub authentication detected. Preparing wallet binding…</div>
+<button id="walletBtn">Connect & Sign Wallet</button>
+<div id="binding" class="status">Wallet is not bound yet.</div>
 <label>Merged GitHub PR URL</label><input id="pr" placeholder="https://github.com/owner/repository/pull/123" autocomplete="off">
-<button id="check">Check contribution</button>
-<div id="status" class="status">Ready to check.</div>
-<p class="note">This public check confirms that the GitHub account exists and that the PR is merged and authored by that account. Entering a wallet address alone does <b>not</b> prove ownership of the GitHub account.</p>
+<button id="verify" disabled>Verify contribution</button>
+<div id="status" class="status">Connect GitHub first.</div>
+</div>
 </div>
 <script>
-const $=id=>document.getElementById(id);const status=$('status');
+const $=id=>document.getElementById(id),status=$('status');
+let identity=null,wallet=null,nonceData=null;
 function show(text,ok=false){status.textContent=text;status.className='status '+(ok?'ok':'error')}
-function walletValid(v){return /^0x[0-9a-fA-F]{40}$/.test(v)}
-function parsePR(v){const m=v.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);return m?{owner:m[1],repo:m[2],number:m[3]}:null}
-async function gh(url){const r=await fetch(url,{headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}});if(!r.ok){let d={};try{d=await r.json()}catch{}throw Error(d.message||`GitHub API returned ${r.status}`)}return r.json()}
-$('check').onclick=async()=>{try{$('check').disabled=true;const username=$('user').value.trim(),wallet=$('wallet').value.trim(),prUrl=$('pr').value.trim();if(!/^[A-Za-z0-9-]{1,39}$/.test(username))throw Error('Enter a valid GitHub username.');if(!walletValid(wallet))throw Error('Enter a valid EVM wallet address (0x + 40 hex characters).');const p=parsePR(prUrl);if(!p)throw Error('Enter a canonical GitHub PR URL.');show('Checking GitHub account…');const user=await gh(`https://api.github.com/users/${encodeURIComponent(username)}`);if(user.login.toLowerCase()!==username.toLowerCase())throw Error('GitHub username could not be verified.');show(`GitHub account found: ${user.login}\nChecking pull request…`);const data=await gh(`https://api.github.com/repos/${encodeURIComponent(p.owner)}/${encodeURIComponent(p.repo)}/pulls/${p.number}`);const author=data.user?.login||'';const merged=!!data.merged_at;if(author.toLowerCase()!==username.toLowerCase())throw Error(`PR author mismatch. This PR was authored by ${author}, not ${username}.`);if(!merged)throw Error('The pull request exists, but it is not merged.');show(`✅ Contribution check passed\n\nGitHub: ${user.login}\nWallet: ${wallet}\nRepository: ${data.base?.repo?.full_name||`${p.owner}/${p.repo}`}\nPR: #${data.number}\nAuthor: ${author}\nMerged: ${data.merged_at}\n\nStatus: Public GitHub contribution verified.\n\nNote: wallet ownership of this GitHub identity is not cryptographically proven by this public-only mode.`,true)}catch(e){show(`❌ Check failed\n\n${e.message||String(e)}`)}finally{$('check').disabled=false}};
+function apiError(r){return r.json().then(d=>{throw Error(d.detail||'Request failed')})}
+async function jsonFetch(url,opts={}){const r=await fetch(url,{credentials:'include',...opts});if(!r.ok)return apiError(r);return r.json()}
+async function loadIdentity(){
+  try{nonceData=await jsonFetch('/wallet/nonce');identity=nonceData; $('login').classList.add('hidden');$('connected').classList.remove('hidden');$('identity').textContent=`GitHub connected: ${identity.github_login} (ID ${identity.github_id})`;show('GitHub connected. Connect your wallet and sign the binding message.');}
+  catch(e){$('login').classList.remove('hidden');$('connected').classList.add('hidden')}
+}
+$('github').onclick=()=>{location.href='/auth/github'};
+$('walletBtn').onclick=async()=>{
+ try{
+  if(!window.ethereum)throw Error('MetaMask is not installed.');
+  const accounts=await window.ethereum.request({method:'eth_requestAccounts'});wallet=accounts[0];
+  nonceData=await jsonFetch('/wallet/nonce');
+  $('identity').textContent=`GitHub connected: ${nonceData.github_login} · Wallet: ${wallet}`;
+  const signature=await window.ethereum.request({method:'personal_sign',params:[nonceData.message,wallet]});
+  const result=await jsonFetch('/wallet/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({wallet_address:wallet,signature,nonce:nonceData.nonce})});
+  $('binding').textContent=`✅ Wallet bound to GitHub ${result.github_id}`;$('binding').className='status ok';$('verify').disabled=false;show('Wallet binding verified. You can now submit a merged PR.',true);
+ }catch(e){show(`❌ Wallet binding failed\n\n${e.message||String(e)}`)}
+};
+$('verify').onclick=async()=>{
+ try{const pr=$('pr').value.trim();if(!/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(pr))throw Error('Enter a canonical GitHub PR URL, e.g. https://github.com/owner/repository/pull/123');if(!wallet)throw Error('Connect the wallet first.');show('Checking PR author and merge status…');const result=await jsonFetch('/claims/prepare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pr_url:pr,wallet_address:wallet})});show(`✅ Contribution verified\n\nGitHub: ${result.canonical.author_login}\nWallet: ${result.wallet_address}\nRepository: ${result.canonical.repository}\nPR: #${result.canonical.pr_number}\nMerged: ${result.canonical.merged_at}\n\nThe PR author matches the GitHub identity bound to this wallet.`,true)}catch(e){show(`❌ Verification failed\n\n${e.message||String(e)}`)}};
+loadIdentity();
 </script></main></body></html>
