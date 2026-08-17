@@ -1,14 +1,4 @@
-"""Backend for GitHub identity binding and canonical PR resolution.
-
-Flow:
-  GitHub OAuth -> canonical numeric github_id -> wallet signature -> persistent
-  binding -> short-lived proof -> GenLayer bind_identity().
-
-For PR claims, the submitted URL is only a lookup hint. /api/pr/resolve calls
-GitHub's REST API with the server's authenticated token and returns a stable,
-normalized canonical record. The Intelligent Contract consumes that record via
-GenLayer's non-deterministic web access and strict consensus.
-"""
+"""Backend for GitHub identity binding and canonical PR resolution."""
 
 import hashlib
 import hmac
@@ -23,10 +13,10 @@ import requests
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, HttpUrl
 
-app = FastAPI(title="Contribution Verifier Identity Backend")
+app = FastAPI(title="Contribution Verifier Identity Backend", version="1.0.0")
 DB = os.getenv("BINDING_DB", "backend/bindings.sqlite3")
 CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
@@ -38,12 +28,15 @@ PROOF_TTL = 300
 
 @app.get("/")
 def root():
+    index = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(index):
+        return FileResponse(index, media_type="text/html")
     return {"service": "contribution-verifier-backend", "status": "ok", "health": "/health"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "contribution-verifier-backend", "version": "1.0.0"}
 
 
 def conn():
@@ -138,8 +131,10 @@ def wallet_verify(body: Binding, request: Request):
     if not row or row[0] != identity["github_id"] or row[2] or row[1] < int(time.time()):
         c.close(); raise HTTPException(400, "nonce invalid, expired, or already used")
     message = f"GenLayer GitHub identity binding\nGitHub ID: {identity['github_id']}\nGitHub Login: {identity['github_login']}\nNonce: {body.nonce}\nExpires: {row[1]}"
-    try: recovered = Account.recover_message(encode_defunct(text=message), signature=body.signature)
-    except Exception as exc: c.close(); raise HTTPException(400, f"invalid wallet signature: {exc}") from exc
+    try:
+        recovered = Account.recover_message(encode_defunct(text=message), signature=body.signature)
+    except Exception as exc:
+        c.close(); raise HTTPException(400, f"invalid wallet signature: {exc}") from exc
     if recovered.lower() != body.wallet_address.lower(): c.close(); raise HTTPException(400, "signature mismatch")
     old = c.execute("SELECT github_id FROM bindings WHERE wallet=?", (body.wallet_address.lower(),)).fetchone()
     if old and old[0] != identity["github_id"]: c.close(); raise HTTPException(409, "wallet already bound to another GitHub identity")
